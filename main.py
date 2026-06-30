@@ -4,9 +4,13 @@ from discord.ext import tasks
 import os
 from dotenv import load_dotenv
 from ollama import AsyncClient
+import requests
+import re
+
 
 load_dotenv()
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+GIPHY_API = os.getenv("GIPHY_API_KEY")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "dolphin-llama3")
 
 if BOT_TOKEN:
@@ -72,7 +76,73 @@ class MyClient(discord.Client):
 
         async with channel.typing():
             reply = await self.get_ai_response(channel.id, combined)
-        await channel.send(reply)
+
+        func_pattern = re.compile(r'\{find_gif\("([^"]+)"\)\}')
+
+        gif_urls = []
+        def replace_func(match):
+            search_term = match.group(1)
+            url = self._fetch_gif(search_term)
+            if url:
+                gif_urls.append(url)
+            return ""
+
+        clean_reply = func_pattern.sub(replace_func, reply).strip()
+
+        if not gif_urls and any("gif" in content.lower() for _, content in messages):
+            search_term = " ".join(
+                word for _, content in messages
+                for word in content.lower().split()
+                if word not in {"gif", "a", "the", "me", "send", "mordbot", "some", "of"}
+            ).strip() or "funny"
+            url = self._fetch_gif(search_term)
+            if url:
+                gif_urls.append(url)
+
+        if clean_reply:
+            await channel.send(clean_reply)
+        for url in gif_urls:
+            await channel.send(url)
+
+    def _fetch_gif(self, search_term: str) -> str | None:
+        try:
+            res = requests.get(
+                "https://api.giphy.com/v1/gifs/search",
+                params={"api_key": GIPHY_API, "q": search_term, "limit": 1}
+            )
+            data = res.json()
+            return data["data"][0]["images"]["original"]["url"]
+        except (IndexError, KeyError, requests.RequestException):
+            return None
+
+    def _filter_repetitions(self, reply: str, history: list) -> str:
+        recent_lines = set()
+        for msg in history[-10:]:
+            if msg["role"] == "assistant":
+                for line in msg["content"].split('\n'):
+                    stripped = line.strip()
+                    if len(stripped) > 10:
+                        recent_lines.add(stripped.lower())
+
+        output_lines = []
+        seen_blank = False
+        for line in reply.split('\n'):
+            stripped = line.strip()
+            if not stripped:
+                if not seen_blank:
+                    output_lines.append('')
+                seen_blank = True
+                continue
+            seen_blank = False
+            if stripped.lower() not in recent_lines:
+                output_lines.append(line)
+
+        result = '\n'.join(output_lines).strip()
+        if not result:
+            for line in reply.split('\n'):
+                if line.strip():
+                    return line.strip()
+        return result
 
     async def get_ai_response(self, channel_id, user_message):
         history = self.history.setdefault(channel_id, [])
@@ -87,11 +157,11 @@ class MyClient(discord.Client):
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
         )
 
-        reply = response.message.content
+        reply = self._filter_repetitions(response.message.content, history)
         history.append({"role": "assistant", "content": reply})
-        
-        if len(history) > 30:
-            self.history[channel_id] = history[-30:]
+
+        if len(history) > 20:
+            self.history[channel_id] = history[-20:]
 
         return reply
 
