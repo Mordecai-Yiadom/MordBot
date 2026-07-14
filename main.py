@@ -12,12 +12,17 @@ top-level `discord` package), so pick one -- this project uses discord.py.
 """
 
 import os
+from dataclasses import dataclass
+from functools import partial
+from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands, voice_recv
 from dotenv import load_dotenv
 
+from agent import AgentDeps, GuildAgentSession, handle_command
+from music import MusicPlayer
 from voice_assistant import (
     VoiceAssistantSink,
     VoiceConnectHelper,
@@ -40,8 +45,18 @@ intents.voice_states = True  # required to join/track voice channels
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# guild_id -> (voice_client, sink), so /leave can clean everything up
-active_sessions: dict[int, tuple[voice_recv.VoiceRecvClient, VoiceAssistantSink]] = {}
+@dataclass
+class GuildSession:
+    """Everything one guild's assistant needs, torn down together on /leave."""
+
+    voice_client: voice_recv.VoiceRecvClient
+    sink: VoiceAssistantSink
+    music: MusicPlayer
+    agent_session: GuildAgentSession
+    text_channel: Optional[discord.TextChannel]
+
+
+active_sessions: dict[int, GuildSession] = {}
 
 _synced = False
 
@@ -64,27 +79,37 @@ async def on_ready():
             print(f"Slash command sync failed: {e}")
 
 
-async def on_voice_command(user: discord.abc.User, text: str):
+async def on_voice_command(guild_id: int, user: discord.abc.User, text: str):
     """
     Called whenever the assistant hears a full command after the wake word.
-    This is where your actual assistant logic goes -- call an LLM, run a
-    tool, generate TTS audio and play it back with `voice_client.play(...)`,
-    etc. Currently just echoes what it heard into a text channel as a demo.
+    Runs the command through the LLM agent and posts the reply to the
+    session's text channel.
     """
     print(f"[assistant] Command from {user}: {text!r}")
 
-    for guild in bot.guilds:
-        member = guild.get_member(user.id)
-        if member is None:
-            continue
-        channel = discord.utils.find(
-            lambda c: isinstance(c, discord.TextChannel)
-            and c.permissions_for(guild.me).send_messages,
-            guild.text_channels,
-        )
-        if channel:
-            await channel.send(f"🎙️ Heard from **{member.display_name}**: {text}")
-        break
+    session = active_sessions.get(guild_id)
+    guild = bot.get_guild(guild_id)
+    if session is None or guild is None:
+        return
+
+    member = guild.get_member(user.id)
+    name = member.display_name if member else str(user)
+    deps = AgentDeps(guild=guild, user_name=name, music=session.music)
+
+    channel = session.text_channel
+    try:
+        if channel is not None:
+            async with channel.typing():
+                reply = await handle_command(session.agent_session, deps, text)
+        else:
+            reply = await handle_command(session.agent_session, deps, text)
+    except Exception as e:
+        print(f"[assistant] Agent error: {e!r}")
+        reply = "⚠️ Sorry, I hit an error handling that."
+
+    print(f"[assistant] Reply: {reply!r}")
+    if channel is not None:
+        await channel.send(f"🎙️ **{name}**: {text}\n💬 {reply}")
 
 
 # ---------------------------------------------------------------------------
@@ -115,11 +140,28 @@ async def join_command(interaction: discord.Interaction, channel: discord.VoiceC
         model=bot.asr_model,
         processor=bot.asr_processor,
         loop=bot.loop,
-        on_command=on_voice_command,
+        on_command=partial(on_voice_command, interaction.guild.id),
         wake_word=WAKE_WORD,
     )
     voice_client.listen(sink)
-    active_sessions[interaction.guild.id] = (voice_client, sink)
+
+    # Replies go where /join was invoked, falling back to any sendable channel.
+    text_channel = interaction.channel
+    if not isinstance(text_channel, discord.TextChannel) or not text_channel.permissions_for(
+        interaction.guild.me
+    ).send_messages:
+        text_channel = discord.utils.find(
+            lambda c: c.permissions_for(interaction.guild.me).send_messages,
+            interaction.guild.text_channels,
+        )
+
+    active_sessions[interaction.guild.id] = GuildSession(
+        voice_client=voice_client,
+        sink=sink,
+        music=MusicPlayer(voice_client, bot.loop),
+        agent_session=GuildAgentSession(),
+        text_channel=text_channel,
+    )
 
     await interaction.followup.send(
         f"✅ Joined **{channel.name}** — say “{WAKE_WORD}” to get my attention."
@@ -134,8 +176,9 @@ async def leave_command(interaction: discord.Interaction):
         await interaction.followup.send("I'm not in a voice channel here.")
         return
 
-    voice_client, _sink = active_sessions.pop(interaction.guild.id)
-    await VoiceConnectHelper.disconnect_voice(voice_client)
+    session = active_sessions.pop(interaction.guild.id)
+    session.music.stop()
+    await VoiceConnectHelper.disconnect_voice(session.voice_client)
     await interaction.followup.send("👋 Left the voice channel.")
 
 
