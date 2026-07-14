@@ -27,7 +27,7 @@ from tts import VoiceSpeaker, load_tts
 from voice_assistant import (
     VoiceAssistantSink,
     VoiceConnectHelper,
-    WAKE_WORD,
+    WAKE_WORDS,
     load_asr_model,
 )
 
@@ -148,7 +148,7 @@ async def join_command(interaction: discord.Interaction, channel: discord.VoiceC
         processor=bot.asr_processor,
         loop=bot.loop,
         on_command=partial(on_voice_command, interaction.guild.id),
-        wake_word=WAKE_WORD,
+        wake_words=WAKE_WORDS,
     )
     voice_client.listen(sink)
 
@@ -173,7 +173,7 @@ async def join_command(interaction: discord.Interaction, channel: discord.VoiceC
     )
 
     await interaction.followup.send(
-        f"✅ Joined **{channel.name}** — say “{WAKE_WORD}” to get my attention."
+        f"✅ Joined **{channel.name}** — say “{WAKE_WORDS}” to get my attention."
     )
 
 

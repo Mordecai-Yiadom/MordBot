@@ -130,7 +130,7 @@ MODEL_ID = "nvidia/nemotron-speech-streaming-en-0.6b"
 # Multilingual alternative (check access first -- see module docstring):
 # MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 
-WAKE_WORD = "hey mordbot"
+WAKE_WORDS = ["hey mordbot", "hey mord bot"]
 
 DISCORD_SAMPLE_RATE = 48000  # Discord always sends/receives PCM at 48kHz
 DISCORD_CHANNELS = 2         # ...stereo...
@@ -195,7 +195,7 @@ class VoiceAssistantSink(voice_recv.AudioSink):
         processor,
         loop: asyncio.AbstractEventLoop,
         on_command: Callable[[discord.abc.User, str], Awaitable[None]],
-        wake_word: str = WAKE_WORD,
+        wake_words: list = WAKE_WORDS,
         vad_aggressiveness: int = 2,
         silence_timeout_s: float = 0.8,
         max_utterance_s: float = 15.0,
@@ -205,7 +205,10 @@ class VoiceAssistantSink(voice_recv.AudioSink):
         self.processor = processor
         self.loop = loop
         self.on_command = on_command
-        self.wake_word = wake_word.lower().strip()
+        self.wake_words = wake_words
+        for wake_word in self.wake_words:
+            wake_word = wake_word.lower().strip()
+        
         self.vad = webrtcvad.Vad(vad_aggressiveness)
         self.max_utterance_s = max_utterance_s
         self.silence_timeout_s = silence_timeout_s
@@ -384,14 +387,15 @@ class VoiceAssistantSink(voice_recv.AudioSink):
         print(f"[voice_assistant] heard from {user}: {text!r} (state={st.state})")
 
         if st.state == "IDLE":
-            if self.wake_word in lowered:
-                remainder = lowered.split(self.wake_word, 1)[1].strip(" ,.!?")
-                if remainder:
-                    # Wake word + command arrived in the same breath.
-                    await self.on_command(user, remainder)
-                else:
-                    st.state = "LISTENING"
-            # else: not addressed to the assistant, ignore
+            for wake_word in self.wake_words:
+                if wake_word in lowered:
+                    remainder = lowered.split(wake_word, 1)[1].strip(" ,.!?")
+                    if remainder:
+                        # Wake word + command arrived in the same breath.
+                        await self.on_command(user, remainder)
+                    else:
+                        st.state = "LISTENING"
+                # else: not addressed to the assistant, ignore
         elif st.state == "LISTENING":
             st.state = "IDLE"
             await self.on_command(user, text)
