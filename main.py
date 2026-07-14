@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 from agent import AgentDeps, GuildAgentSession, handle_command
 from music import MusicPlayer
+from tts import VoiceSpeaker, load_tts
 from voice_assistant import (
     VoiceAssistantSink,
     VoiceConnectHelper,
@@ -54,6 +55,7 @@ class GuildSession:
     music: MusicPlayer
     agent_session: GuildAgentSession
     text_channel: Optional[discord.TextChannel]
+    speaker: VoiceSpeaker
 
 
 active_sessions: dict[int, GuildSession] = {}
@@ -111,6 +113,11 @@ async def on_voice_command(guild_id: int, user: discord.abc.User, text: str):
     if channel is not None:
         await channel.send(f"🎙️ **{name}**: {text}\n💬 {reply}")
 
+    try:
+        await session.speaker.speak(reply)
+    except Exception as e:
+        print(f"[assistant] TTS error: {e!r}")
+
 
 # ---------------------------------------------------------------------------
 # Slash commands
@@ -155,12 +162,14 @@ async def join_command(interaction: discord.Interaction, channel: discord.VoiceC
             interaction.guild.text_channels,
         )
 
+    music = MusicPlayer(voice_client, bot.loop)
     active_sessions[interaction.guild.id] = GuildSession(
         voice_client=voice_client,
         sink=sink,
-        music=MusicPlayer(voice_client, bot.loop),
+        music=music,
         agent_session=GuildAgentSession(),
         text_channel=text_channel,
+        speaker=VoiceSpeaker(voice_client, music, bot.tts, bot.loop),
     )
 
     await interaction.followup.send(
@@ -189,4 +198,5 @@ async def leave_command(interaction: discord.Interaction):
 if __name__ == "__main__":
     # Loaded once here, shared across every /join in every guild.
     bot.asr_model, bot.asr_processor = load_asr_model()
+    bot.tts = load_tts()
     bot.run(BOT_TOKEN)

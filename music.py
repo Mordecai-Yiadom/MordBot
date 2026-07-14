@@ -67,6 +67,10 @@ class MusicPlayer:
         self.queue: list[Track] = []
         self.current: Optional[Track] = None
         self._ytdl = yt_dlp.YoutubeDL(YTDL_OPTS)
+        # Where the current track started within the source (nonzero after a
+        # speech interruption), used to compute the absolute resume position.
+        self._seek_offset: float = 0.0
+        self._pending_seek: float = 0.0
 
     # -- lookup ----------------------------------------------------------
 
@@ -130,6 +134,29 @@ class MusicPlayer:
             self.voice_client.stop()
         return "Stopped playback and cleared the queue." if had_track else "Nothing was playing."
 
+    def interrupt(self) -> Optional[tuple[Track, float]]:
+        """
+        Stops the current track so the bot can speak, returning
+        (track, position_seconds) for resume_interrupted(). Returns None if
+        nothing needs resuming. Position comes from the audio player's frame
+        counter (`_player.loops`, 20ms per frame -- private API, but the only
+        place discord.py tracks playback progress).
+        """
+        if self.current is None:
+            return None
+        player = getattr(self.voice_client, "_player", None)
+        played = player.loops * 0.02 if player else 0.0
+        position = self._seek_offset + played
+        track, self.current = self.current, None  # None => after-callback won't chain
+        self.voice_client.stop()
+        return (track, position)
+
+    def resume_interrupted(self, track: Track, position: float) -> None:
+        """Restarts an interrupted track at (roughly) where it left off."""
+        self.queue.insert(0, track)
+        self._pending_seek = max(0.0, position - 1.0)  # rewind 1s for continuity
+        self._start_next()
+
     def queue_summary(self) -> str:
         lines = []
         if self.current:
@@ -149,9 +176,14 @@ class MusicPlayer:
 
         track = self.queue.pop(0)
         self.current = track
+        self._seek_offset, seek = self._pending_seek, self._pending_seek
+        self._pending_seek = 0.0
+        before_options = FFMPEG_BEFORE_OPTS
+        if seek > 0:
+            before_options = f"-ss {seek:.2f} {before_options}"
         source = discord.FFmpegPCMAudio(
             track.stream_url,
-            before_options=FFMPEG_BEFORE_OPTS,
+            before_options=before_options,
             options=FFMPEG_OPTS,
         )
         self.voice_client.play(source, after=self._on_track_end)
