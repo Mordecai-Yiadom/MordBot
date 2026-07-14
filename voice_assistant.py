@@ -130,7 +130,7 @@ MODEL_ID = "nvidia/nemotron-speech-streaming-en-0.6b"
 # Multilingual alternative (check access first -- see module docstring):
 # MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 
-WAKE_WORD = "hey assistant"
+WAKE_WORD = "hey mordbot"
 
 DISCORD_SAMPLE_RATE = 48000  # Discord always sends/receives PCM at 48kHz
 DISCORD_CHANNELS = 2         # ...stereo...
