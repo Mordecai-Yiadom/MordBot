@@ -1,1 +1,6 @@
 .env
+__pycache__/
+debug_audio/
+models/
+venv/
+.venv/
